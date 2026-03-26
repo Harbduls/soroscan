@@ -249,6 +249,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "soroscan.ingest.tasks.evaluate_remediation_rules",
         "schedule": 300,  # every 5 minutes
     },
+    "check-scheduled-resumes": {
+        "task": "soroscan.ingest.tasks.check_scheduled_resumes",
+        "schedule": 60,  # every minute
+    },
 }
 
 # Stellar / Soroban Configuration

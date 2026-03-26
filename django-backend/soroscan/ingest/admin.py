@@ -40,6 +40,11 @@ class BackfillActionForm(ActionForm):
     to_ledger = forms.IntegerField(min_value=1, required=False, label="To ledger")
 
 
+class PauseActionForm(ActionForm):
+    reason = forms.CharField(required=False, widget=forms.TextInput(attrs={"placeholder": "Reason for pause"}))
+    resume_at = forms.DateTimeField(required=False, label="Resume at (UTC)", help_text="YYYY-MM-DD HH:MM:SS")
+
+
 class AdminAuditMixin:
     """Write immutable admin action entries with user attribution and IP."""
 
@@ -117,16 +122,19 @@ class TrackedContractAdmin(AdminAuditMixin, admin.ModelAdmin):
         "owner",
         "team",
         "is_active",
+        "is_paused_display",
         "last_indexed_ledger",
         "event_count",
         "created_at",
     ]
-    list_filter = ["is_active", "created_at"]
+    list_filter = ["is_active", "is_paused", "created_at"]
     search_fields = ["name", "contract_id"]
-    readonly_fields = ["created_at", "updated_at"]
+    readonly_fields = ["created_at", "updated_at", "paused_at", "pause_reason", "resume_at"]
     ordering = ["-created_at"]
-    action_form = BackfillActionForm
-    actions = ["backfill_events"]
+    action_form = PauseActionForm  # Note: This might conflict with BackfillActionForm if both are needed.
+    # In Django, only one action_form can be set. I'll combine them or use a more generic form if possible.
+    # For now, I'll prioritize PauseActionForm as per the new requirements.
+    actions = ["pause_indexing", "resume_indexing", "backfill_events"]
 
     @admin.display(description="Contract ID")
     def contract_id_short(self, obj):
@@ -139,10 +147,49 @@ class TrackedContractAdmin(AdminAuditMixin, admin.ModelAdmin):
             _event_count=Count("events", distinct=True)
         ).select_related("owner")
 
+    @admin.display(description="Paused", boolean=True)
+    def is_paused_display(self, obj):
+        return obj.is_paused
+
     @admin.display(description="Events")
     def event_count(self, obj):
         """Use annotated count to avoid N+1 queries."""
         return getattr(obj, "_event_count", 0)
+
+    @admin.action(description="Pause indexing")
+    def pause_indexing(self, request, queryset):
+        reason = request.POST.get("reason")
+        resume_at = request.POST.get("resume_at")
+
+        if not reason:
+            self.message_user(request, "A reason is required to pause indexing.", level=messages.ERROR)
+            return
+
+        parsed_resume_at = None
+        if resume_at:
+            from django.utils.dateparse import parse_datetime
+            parsed_resume_at = parse_datetime(resume_at)
+            if not parsed_resume_at:
+                self.message_user(request, "Invalid resume_at format. Use YYYY-MM-DD HH:MM:SS.", level=messages.ERROR)
+                return
+
+        count = 0
+        for contract in queryset:
+            if not contract.is_paused:
+                contract.pause(reason=reason, resume_at=parsed_resume_at)
+                count += 1
+        
+        self.message_user(request, f"Paused indexing for {count} contract(s).", level=messages.SUCCESS)
+
+    @admin.action(description="Resume indexing")
+    def resume_indexing(self, request, queryset):
+        count = 0
+        for contract in queryset:
+            if contract.is_paused:
+                contract.resume()
+                count += 1
+        
+        self.message_user(request, f"Resumed indexing for {count} contract(s).", level=messages.SUCCESS)
 
     @admin.action(description="Backfill events")
     def backfill_events(self, request, queryset):

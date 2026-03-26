@@ -528,6 +528,78 @@ def dispatch_webhook(self, subscription_id: int, event_id: int) -> bool:
     return False
 
 
+@shared_task(
+    bind=True,
+    autoretry_for=(requests.exceptions.RequestException,),
+    retry_backoff=True,
+    retry_backoff_max=300,
+    max_retries=3,
+)
+def dispatch_webhook_data(self, subscription_id: int, event_type: str, payload: dict) -> bool:
+    """
+    Deliver custom notification data to a WebhookSubscription endpoint.
+    Used for contract.paused and contract.resumed events.
+    """
+    try:
+        webhook = WebhookSubscription.objects.get(
+            id=subscription_id,
+            is_active=True,
+            status=WebhookSubscription.STATUS_ACTIVE,
+        )
+    except WebhookSubscription.DoesNotExist:
+        return False
+
+    payload_bytes = json.dumps(payload, sort_keys=True).encode("utf-8")
+    sig_hex = hmac.new(
+        webhook.secret.encode("utf-8"),
+        msg=payload_bytes,
+        digestmod=hashlib.sha256,
+    ).hexdigest()
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-SoroScan-Signature": f"sha256={sig_hex}",
+        "X-SoroScan-Timestamp": timezone.now().isoformat(),
+        "X-SoroScan-Event": event_type,
+    }
+
+    try:
+        response = requests.post(
+            webhook.target_url,
+            data=payload_bytes,
+            headers=headers,
+            timeout=10,
+        )
+        response.raise_for_status()
+        return True
+    except Exception as exc:
+        logger.warning("Failed to dispatch custom webhook %s: %s", subscription_id, exc)
+        raise self.retry(exc=exc)
+
+
+@shared_task
+def check_scheduled_resumes() -> int:
+    """
+    Find paused contracts whose resume_at time has passed and resume them.
+    Run this periodically via Celery Beat (e.g., every minute).
+    """
+    from .models import TrackedContract
+    
+    now = timezone.now()
+    contracts = TrackedContract.objects.filter(
+        is_paused=True,
+        resume_at__lte=now
+    )
+    
+    resumed_count = 0
+    for contract in contracts:
+        logger.info("Automatically resuming contract %s (scheduled)", contract.contract_id)
+        contract.resume()
+        resumed_count += 1
+        
+    return resumed_count
+
+
 # ---------------------------------------------------------------------------
 # Private helpers for dispatch_webhook
 # ---------------------------------------------------------------------------
@@ -728,7 +800,7 @@ def sync_events_from_horizon() -> int:
 
     try:
         contract_ids = list(
-            TrackedContract.objects.filter(is_active=True).values_list("contract_id", flat=True)
+            TrackedContract.objects.filter(is_active=True, is_paused=False).values_list("contract_id", flat=True)
         )
 
         # Always update the gauge, even when there are no active contracts.
@@ -1331,8 +1403,7 @@ def _execute_remediation_actions(
 
         if action_type == "pause_contract":
             if not effective_dry_run:
-                incident.contract.is_active = False
-                incident.contract.save(update_fields=["is_active"])
+                incident.contract.pause(reason=f"Automated remediation: {incident.rule.name}")
             entry["status"] = "executed"
 
         elif action_type == "disable_webhooks":

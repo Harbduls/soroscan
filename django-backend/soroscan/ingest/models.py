@@ -117,17 +117,51 @@ class TrackedContract(models.Model):
         help_text="Last ledger sequence that was indexed for this contract",
     )
     is_active = models.BooleanField(default=True, help_text="Whether indexing is active")
+    is_paused = models.BooleanField(default=False, help_text="Whether indexing is temporarily paused")
+    paused_at = models.DateTimeField(null=True, blank=True, help_text="When indexing was paused")
+    pause_reason = models.TextField(blank=True, help_text="Reason for horizontal suspension/pausing")
+    resume_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Scheduled time to automatically resume indexing",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
         indexes = [
-            models.Index(fields=["contract_id", "is_active"]),
+            models.Index(fields=["contract_id", "is_active", "is_paused"]),
         ]
 
     def __str__(self):
-        return f"{self.name} ({self.contract_id[:8]}...)"
+        status = "[PAUSED] " if self.is_paused else ""
+        return f"{status}{self.name} ({self.contract_id[:8]}...)"
+
+    def pause(self, reason: str, resume_at=None):
+        """Temporarily stop indexing new events."""
+        from django.utils import timezone
+        self.is_paused = True
+        self.paused_at = timezone.now()
+        self.pause_reason = reason
+        self.resume_at = resume_at
+        self.save(update_fields=["is_paused", "paused_at", "pause_reason", "resume_at"])
+        
+        # Trigger webhook (to be implemented in tasks or specialized service)
+        from .webhooks import notify_contract_status_change
+        notify_contract_status_change(self, "paused")
+
+    def resume(self):
+        """Restart indexing events."""
+        self.is_paused = False
+        self.paused_at = None
+        self.pause_reason = ""
+        self.resume_at = None
+        self.save(update_fields=["is_paused", "paused_at", "pause_reason", "resume_at"])
+        
+        # Trigger webhook
+        from .webhooks import notify_contract_status_change
+        notify_contract_status_change(self, "resumed")
 
 
 class ContractInvocation(models.Model):
