@@ -118,23 +118,53 @@ class TeamMembershipAdmin(admin.ModelAdmin):
 class TrackedContractAdmin(AdminAuditMixin, admin.ModelAdmin):
     list_display = [
         "name",
+        "alias",
         "contract_id_short",
         "owner",
         "team",
         "is_active",
         "is_paused_display",
+        "deprecation_status",
+        "event_filter_type",
+        "max_events_per_minute",
         "last_indexed_ledger",
         "event_count",
         "created_at",
     ]
-    list_filter = ["is_active", "is_paused", "created_at"]
-    search_fields = ["name", "contract_id"]
-    readonly_fields = ["created_at", "updated_at", "paused_at", "pause_reason", "resume_at"]
+    list_filter = ["is_active", "deprecation_status", "event_filter_type", "created_at"]
+    search_fields = ["name", "alias", "contract_id"]
+    readonly_fields = ["created_at", "updated_at"]
     ordering = ["-created_at"]
-    action_form = PauseActionForm  # Note: This might conflict with BackfillActionForm if both are needed.
-    # In Django, only one action_form can be set. I'll combine them or use a more generic form if possible.
-    # For now, I'll prioritize PauseActionForm as per the new requirements.
-    actions = ["pause_indexing", "resume_indexing", "backfill_events"]
+    action_form = BackfillActionForm
+    actions = ["backfill_events"]
+    fieldsets = (
+        (None, {
+            "fields": (
+                "contract_id", "name", "alias", "description",
+                "owner", "team", "is_active",
+            ),
+        }),
+        ("Event Filtering", {
+            "fields": ("event_filter_type", "event_filter_list"),
+            "description": (
+                "Control which event types are persisted at ingest time. "
+                "Whitelist: only listed types are stored. "
+                "Blacklist: listed types are dropped."
+            ),
+        }),
+        ("Advanced", {
+            "fields": (
+                "deprecation_status", "deprecation_reason",
+                "max_events_per_minute", "abi_schema",
+                "last_indexed_ledger",
+            ),
+            "classes": ("collapse",),
+        }),
+        ("Timestamps", {
+            "fields": ("created_at", "updated_at"),
+            "classes": ("collapse",),
+        }),
+    )
 
     @admin.display(description="Contract ID")
     def contract_id_short(self, obj):
@@ -457,12 +487,29 @@ class WebhookSubscriptionAdmin(AdminAuditMixin, admin.ModelAdmin):
         "event_type_display",
         "status",
         "is_active_display",
+        "timeout_seconds",
         "failure_count",
         "last_delivery_status",
     ]
     list_filter = ["is_active", "status", "contract", "created_at"]
     search_fields = ["target_url", "contract__name", "event_type"]
     readonly_fields = ["secret", "created_at", "last_triggered", "failure_count", "status"]
+    fieldsets = (
+        (None, {
+            "fields": ("contract", "target_url", "event_type", "is_active"),
+        }),
+        ("Configuration", {
+            "fields": ("timeout_seconds",),
+        }),
+        ("Status", {
+            "fields": ("status", "failure_count", "last_triggered"),
+            "classes": ("collapse",),
+        }),
+        ("Secret", {
+            "fields": ("secret",),
+            "classes": ("collapse",),
+        }),
+    )
     ordering = ["-created_at"]
 
     def get_queryset(self, request):
